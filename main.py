@@ -1,7 +1,10 @@
 import os
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
+# os.environ['LOG_LEVEL_DEBUG'] = "1"
+# os.environ['LOG_LEVEL_VERBOSE_DEBUG'] = "1"
 
-from sim900a import SIM900A
+from lib.sim900a import SIM900A
+from lib.logger import Logger
 import re
 import pygame
 # from RealtimeTTS import TextToAudioStream, GTTSEngine
@@ -14,6 +17,8 @@ def load_data():
     import song_data
     importlib.reload(song_data)
     return song_data.songs  # Access the dictionary from the module
+
+logger = Logger("CallaTune")
 
 pattern_menu = r".*\bmenu\s*(\d+)\b.*"
 pattern_song = r".*\bsong\s*(\d+)\b.*"
@@ -90,7 +95,7 @@ def build_song_list_with_pagination(triplet_dict, header, padding_length=2, max_
 def sms_callback(header, data, args):
     global current_song
 
-    print(f"[DEBUG] SMS From {header[0]} at {header[1]} with message ID {header[2]} and content \"{data}\"")
+    logger.debug(f"SMS From {header[0]} at {header[1]} with message ID {header[2]} and content \"{data}\"")
 
     gsm = args[0]
     data = data.lower()
@@ -117,19 +122,20 @@ def phone_callback(data, args):
     gsm = args[0]
     now = datetime.now()
     formatted_time = now.strftime("%y/%m/%d,%H:%M:%S")
+
     if data[2] == 0:
         play_music()
-        print(f"[DEBUG] Answered call from {data[5]} at {formatted_time}")
+        logger.debug(f"Answered call from {data[5]} at {formatted_time}")
     elif data[2] == 1:
-        print(f"[DEBUG] Held call from {data[5]} at {formatted_time}")
+        logger.debug(f"Held call from {data[5]} at {formatted_time}")
     elif data[2] == 4:
-        print(f"[DEBUG] Received call from {data[5]} at {formatted_time}")
+        logger.debug(f"Received call from {data[5]} at {formatted_time}")
     elif data[2] == 5:
         gsm.add_waiting_call()
-        print(f"[DEBUG] Added Waiting call from {data[5]} at {formatted_time}")
+        logger.debug(f"Added Waiting call from {data[5]} at {formatted_time}")
     elif data[2] == 6:
         end_music()
-        print(f"[DEBUG] End call from {data[5]} at {formatted_time}")
+        logger.debug(f"End call from {data[5]} at {formatted_time}")
     return True
 
 def main():
@@ -147,10 +153,10 @@ def main():
     gsm.start_thread()
 
     song_menu = build_song_list_with_pagination(songs, "==Song List==")
-    print(f"[INFO ] Generated song menu")
-    print(f"[DEBUG] Song Menu: {song_menu}")
+    logger.info(f"Generated song menu")
+    logger.debug(f"Song Menu: {song_menu}")
 
-    print(f"[INFO ] System Ready")
+    logger.info(f"System Ready")
 
     while True:
         while music_playing:
@@ -161,14 +167,12 @@ def main():
         updated_data = load_data()
         try:
             if updated_data != songs:
-                print(f"[INFO ] Song Menu updated")
+                logger.info(f"Song Menu updated")
                 songs = updated_data
                 song_menu = build_song_list_with_pagination(songs, "==Song List==")
-                print(f"[DEBUG] New song menu: {song_menu}")
+                logger.debug(f"New song menu: {song_menu}")
         except SyntaxError:
-            print("Syntax error in song_data! Please check!")
-        # else:
-        #     print("No update")
+            logger.error("Syntax error in song_data! Please check!")
 
 if __name__ == "__main__":
     main()

@@ -2,6 +2,7 @@ import serial
 import threading
 import time
 import re
+from . import logger
 
 class SIM900A:
     __sms_callback = None
@@ -15,19 +16,37 @@ class SIM900A:
     __is_call_ongoing = False
     __last_caller = None
 
+    __logger = logger.Logger("SIM900A")
+
+    CALL_STATUS_ACTIVE = 0
+    CALL_STATUS_HELD = 1
+    CALL_STATUS_DIALING = 2
+    CALL_STATUS_ALERTING = 3
+    CALL_STATUS_INCOMING = 4
+    CALL_STATUS_WAITING = 5
+    CALL_STATUS_DISCONNECTED = 6
+
+    CALL_DIRECTION_INCOMING = 0
+    CALL_DIRECTION_OUTGOING = 1
+
     def __init__(self, com_port, baudrate):
+        self.__logger.verbose_debug(f"Initializing SIM900A on {com_port} with baudrate {baudrate}")
         self.__serial = serial.Serial(port=com_port, baudrate=baudrate, timeout=1)
 
         self.__serial.write(b"AT+CLCC=1\r\n")
-        self.__wait_for_char("OK")
+        if not self.__wait_for_char("OK"):
+            self.__logger.warn("Failed to set CLCC mode")
         self.__serial.write(b"AT+CNMI=2,1,0,0,0\r\n")
-        self.__wait_for_char("OK")
+        if not self.__wait_for_char("OK"):
+            self.__logger.warn("Failed to set CNMI mode")
         self.__serial.write(b"AT+CMGF=1\r\n")
-        self.__wait_for_char("OK")
+        if not self.__wait_for_char("OK"):
+            self.__logger.warn("Failed to set CMGF mode")
 
     def set_sms_callback(self, smscallback, args=()):
         self.__sms_callback = smscallback
         self.__sms_params = args
+
     def set_phone_callback(self, phcallback, args=()):
         self.__phone_callback = phcallback
         self.__phone_params = args
@@ -38,6 +57,8 @@ class SIM900A:
             serial_thread.start()
 
     def __CMTI_handler(self, data):
+        self.__logger.verbose_debug(f"CMTI handler: {data}")
+
         match = re.search(r'(\d+)$', data)
         if not match:
             return
@@ -68,11 +89,19 @@ class SIM900A:
                 time.sleep(0.1)
         
         sms = sms[:-1]
+        if not self.__sms_callback:
+            self.__logger.warn("No SMS callback set, got {header}, {sms}")
+            return
         self.__sms_callback(header, sms, self.__sms_params)
 
     def __CLCC_handler(self, data):
+        self.__logger.verbose_debug(f"CLCC handler: {data}")
         dec_dat = self.__decode_CLCC(data)
-        ret = self.__phone_callback(dec_dat, self.__sms_params)
+        if not self.__phone_callback:
+            self.__logger.warn("No phone callback set, got {dec_dat}")
+            return
+        
+        ret = self.__phone_callback(dec_dat, self.__phone_params)
 
         if dec_dat[2] == 0:
             self.__is_call_ongoing = True
@@ -84,8 +113,7 @@ class SIM900A:
             self.__answer_call()
 
     def __gsm_handler(self, data):
-        # print(type(self))
-        # print(data)
+        self.__logger.verbose_debug(f"GSM handler: {data}")
         
         if "+CMTI:" in data and self.__sms_callback is not None:
             self.__CMTI_handler(data)
@@ -99,18 +127,21 @@ class SIM900A:
             try:
                 if self.__serial.in_waiting > 0:
                     data = self.__serial.readline().decode('utf-8').strip()
-                    # print(f"Received: {data}")
+                    self.__logger.verbose_debug(f"Received: {data}")
                     self.__gsm_handler(data)
                 else:
                     time.sleep(0.1)  # Avoid high CPU usage when no data is received
             except serial.SerialException as e:
-                print(f"Serial error: {e}")
+                # Handle serial port errors (e.g., disconnection)
+                self.__logger.error(f"Serial error: {e}")
                 break
             except Exception as e:
-                print(f"Unexpected error: {e}")
-        print("Exiting serial reading thread.")
+                self.__logger.error(f"Unexpected error: {e}")
+        self.__serial.close()
+        self.__logger.error("Exiting serial reading thread.")
 
     def __decode_CLCC(self, string):
+        self.__logger.verbose_debug(f"Decoding CLCC: {string}")
         clcc_pattern = r'\+CLCC: (\d+),(\d+),(\d+),(\d+),(\d+),"(.*?)",(\d+),"?"(.*?)"?'
         clcc_match = re.search(clcc_pattern, string)
 
@@ -124,8 +155,12 @@ class SIM900A:
             num_type = int(clcc_match.group(7))     # Number type
             alpha = clcc_match.group(8)             # Alphanumeric info (if any)
 
+            self.__logger.verbose_debug(f"Decoded CLCC: {idx}, {direction}, {status}, {mode}, {multiparty}, {number}, {num_type}, {alpha}")
             return (idx, direction, status, mode, multiparty, number, num_type, alpha)
 
+        self.__logger.warn(f"Failed to decode CLCC: {string}")
+        self.__logger.verbose_debug(f"CLCC pattern: {clcc_pattern}")
+        self.__logger.verbose_debug(f"CLCC match: {clcc_match}")
         return None
     
     def __decode_CMGR(self, str):
@@ -147,8 +182,16 @@ class SIM900A:
         while True:
             if self.__serial.in_waiting > 0:
                 dat = self.__serial.readline().decode('utf-8').strip()
+                self.__logger.verbose_debug(f"Waiting for {char}: {dat}")
                 if char in dat:
                     break
+                if "ERROR" in dat:
+                    self.__logger.verbose_debug(f"GSM responded with ERROR!")
+                    return False
+        self.__logger.verbose_debug(f"In queue {self.__serial.in_waiting} bytes")
+        self.__logger.verbose_debug(f"Read lines: {self.__serial.readlines()}")
+        self.__logger.verbose_debug(f"Waiting for {char} done")
+        return True
 
     def sendSMS_txtmode_lastcaller(self, message):
         self.sendSMS_txtmode(self.__last_caller, message)
@@ -171,42 +214,6 @@ class SIM900A:
         self.__block_thread = True
         self.__serial.write(f'AT+CMGD={sms_no}\r\n'.encode())
         self.__wait_for_char("OK")
-        self.__block_thread = False
-
-    def __encode_pdu(self, number, message):
-        """Encode the phone number and message into a PDU format."""
-        # Phone number encoding (add zero-padding if needed)
-        if number.startswith("+"):
-            number = number[1:]
-        length = len(number)
-        if length % 2 != 0:
-            number += "F"
-        encoded_number = ''.join([number[i+1] + number[i] for i in range(0, len(number), 2)])
-        encoded_number = f"91{encoded_number}"  # 91 indicates international format
-
-        # Message encoding (7-bit GSM default alphabet)
-        encoded_message = ''.join([f"{ord(c):02X}" for c in message])
-
-        # Calculate lengths
-        tpdu_length = len(encoded_message) // 2
-        return f"00{len(number)//2:02X}{encoded_number}0000A7{tpdu_length:02X}{encoded_message}"
-
-    def sendSMS_pdumode(self, number, message):
-        self.__block_thread = True
-
-        self.__serial.write(b"AT+CMGF=0\r\n")
-        self.__wait_for_char("OK")
-        
-        pdu_message = self.__encode_pdu(number, message)
-        length = len(pdu_message) // 2
-        
-        print(pdu_message)
-
-        self.__serial.write(f"AT+CMGS={length}\r\n".encode())
-        self.__wait_for_char(">")
-        self.__serial.write(f"{pdu_message}\x1A".encode())  # \x1A is the Ctrl+Z character
-        # self.__wait_for_char("OK")
-        
         self.__block_thread = False
 
     def get_call_status(self):
